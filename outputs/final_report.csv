@@ -1,0 +1,13 @@
+user_id,ip_address,login_time,failed_attempts,location,file_accessed,url_accessed,Risk_Level,URL_Status
+101,192.168.1.1,10:00,0,India,report.pdf,google.com,LOW,SAFE
+102,192.168.1.5,02:30,5,Russia,secret.zip,malicious-site.com,HIGH,PHISHING ⚠️
+103,192.168.1.8,14:00,0,India,data.csv,github.com,LOW,SAFE
+104,192.168.1.9,03:00,7,Unknown,admin.db,phishing.com,CRITICAL,PHISHING ⚠️
+105,192.168.1.3,11:00,1,India,notes.txt,stackoverflow.com,LOW,SAFE
+106,192.168.1.10,01:15,6,China,secure.pdf,fake-login.com,CRITICAL,PHISHING ⚠️
+107,192.168.1.11,23:50,2,India,data.txt,github.com,HIGH,SAFE
+108,192.168.1.12,02:10,8,Russia,admin.zip,attack-site.net,CRITICAL,PHISHING ⚠️
+109,192.168.1.13,15:00,0,India,image.png,google.com,LOW,SAFE
+110,192.168.1.14,00:45,9,Unknown,passwords.txt,phishing-login.com,CRITICAL,PHISHING ⚠️
+111,192.168.1.15,04:20,6,Nigeria,confidential.docx,fakebank.com,MEDIUM,PHISHING ⚠️
+112,192.168.1.16,13:30,0,India,project.zip,github.com,LOW,SAFE
