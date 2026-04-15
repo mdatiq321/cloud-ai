@@ -3,7 +3,7 @@ from datetime import datetime
 from flask_cors import CORS
 from ml_model import predict_risk
 from live_logs import generate_log
-
+from flask import request, jsonify
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 import boto3
@@ -147,6 +147,8 @@ def analyze():
     except Exception as e:
         return jsonify({"error": str(e)})
     
+from flask import request, jsonify
+
 @app.route("/scan-file", methods=["POST"])
 def scan_file():
     file = request.files.get("file")
@@ -154,23 +156,47 @@ def scan_file():
     if not file:
         return jsonify({"error": "No file uploaded"})
 
-    content = file.read().decode(errors="ignore").lower()
+    # read file content safely
+    try:
+        content = file.read().decode(errors="ignore").lower()
+    except:
+        return jsonify({"error": "Unable to read file"})
 
-    # simple detection
-    suspicious_keywords = ["http", "https", "login", "password", "verify", "bank", "otp"]
-    
-    risk = "SAFE"
+    # improved suspicious patterns
+    suspicious_keywords = [
+        "login", "password", "verify", "bank", "otp",
+        "urgent", "click here", "reset password"
+    ]
+
+    suspicious_links = ["http://"]  # unsafe links only
+
     found = []
+    score = 0
 
+    # check keywords
     for word in suspicious_keywords:
         if word in content:
-            risk = "MALICIOUS"
             found.append(word)
+            score += 1
+
+    # check unsafe links
+    for link in suspicious_links:
+        if link in content:
+            found.append(link)
+            score += 2   # higher weight for unsafe link
+
+    # final decision
+    if score >= 2:
+        risk = "MALICIOUS"
+    else:
+        risk = "SAFE"
 
     return jsonify({
         "risk": risk,
-        "found_keywords": found
+        "found_keywords": found,
+        "score": score
     })
+
     
 
 # ---------------- RUN ----------------
