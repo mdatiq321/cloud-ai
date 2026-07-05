@@ -15,6 +15,80 @@ CORS(app)
 
 
 # ================================================================
+# DATABASE CONNECTION (Postgres in production, SQLite for local dev)
+# ================================================================
+#
+# IMPORTANT FIX:
+# The previous version used a plain local SQLite file ("users.db") with
+# no persistent volume. On hosts like Render, the filesystem is EPHEMERAL:
+# it gets wiped on every restart / redeploy, and free-tier services also
+# spin down after ~15 minutes of inactivity and boot a fresh container on
+# the next request. That wiped the SQLite file, which is why new users
+# would appear right after signup and then vanish after a while / refresh.
+#
+# Fix: if a DATABASE_URL environment variable is present (Render Postgres,
+# or any managed Postgres provider, sets this automatically), use Postgres,
+# which persists independently of the app container. If DATABASE_URL is not
+# set (e.g. running locally), fall back to SQLite so local dev still works
+# with zero setup.
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+USE_POSTGRES = bool(DATABASE_URL)
+
+if USE_POSTGRES:
+    import psycopg2
+    import psycopg2.extras
+    # Render's DATABASE_URL sometimes uses "postgres://" which psycopg2
+    # no longer accepts; normalize to "postgresql://".
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+
+def get_db_connection():
+    """Return a DB connection — Postgres if DATABASE_URL is set, else SQLite."""
+    if USE_POSTGRES:
+        return psycopg2.connect(DATABASE_URL, sslmode="require")
+    return sqlite3.connect("users.db")
+
+
+def ph():
+    """Return the correct SQL parameter placeholder for the active DB."""
+    return "%s" if USE_POSTGRES else "?"
+
+
+def init_db():
+    """Create the users table if it doesn't already exist (self-healing schema)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if USE_POSTGRES:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+init_db()
+
+
+# ================================================================
 # HOME
 # ================================================================
 
@@ -41,33 +115,46 @@ def get_logs():
 def signup():
     data = request.get_json(force=True)
 
-    username = data.get("username")
-    password = generate_password_hash(data.get("password"))
+    username = data.get("username", "").strip()
+    raw_password = data.get("password")
+
+    if not username or not raw_password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    password = generate_password_hash(raw_password)
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = sqlite3.connect("users.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
         cursor.execute(
-            "INSERT INTO users (username, password, created_at) VALUES (?, ?, ?)",
+            f"INSERT INTO users (username, password, created_at) VALUES ({ph()}, {ph()}, {ph()})",
             (username, password, created_at)
         )
         conn.commit()
         return jsonify({"message": "User created"})
-    except:
-        return jsonify({"error": "User already exists"})
+    except (sqlite3.IntegrityError, Exception) as e:
+        # psycopg2.errors.UniqueViolation subclasses Exception, not sqlite3.IntegrityError,
+        # so we check the message to distinguish a duplicate-username error from a real failure.
+        conn.rollback()
+        if "unique" in str(e).lower() or "UNIQUE" in str(e):
+            return jsonify({"error": "User already exists"})
+        print(f"❌ SIGNUP ERROR: {e}")
+        return jsonify({"error": "Signup failed"}), 500
     finally:
+        cursor.close()
         conn.close()
 
 
 @app.route("/users", methods=["GET"])
 def get_users():
-    conn = sqlite3.connect("users.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, username, created_at FROM users")
+    cursor.execute("SELECT id, username, created_at FROM users ORDER BY id DESC")
     users = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     result = []
@@ -89,17 +176,19 @@ def get_users():
 def login():
     data = request.get_json(force=True)
 
-    username = data.get("username")
+    username = data.get("username", "").strip()
     password = data.get("password")
 
-    conn = sqlite3.connect("users.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT password FROM users WHERE username=?", (username,))
+    cursor.execute(f"SELECT password FROM users WHERE username={ph()}", (username,))
     user = cursor.fetchone()
+
+    cursor.close()
     conn.close()
 
-    if not user:
+    if user is None:
         return jsonify({"error": "Account not created"})
 
     if not check_password_hash(user[0], password):
