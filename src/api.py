@@ -280,12 +280,12 @@ def analyze():
 
     Design decisions:
       - 4 pages × 50 events = up to 200 raw events fetched.
-      - Only the small IGNORED_EVENTS set is dropped; everything else is kept
-        so the dashboard shows a realistic, varied mix of event types.
-      - Events are split into HIGH/CRITICAL/MEDIUM (priority) and LOW (fill).
-      - Final response: all priority events + enough LOW events to reach ~50
-        total cards, giving the dashboard a full, professional appearance.
-      - Sorted newest-first.
+      - Noisy AWS-internal events are filtered via IGNORED_EVENTS.
+      - Events are split into CRITICAL, HIGH, MEDIUM (always shown) and LOW (capped).
+      - All CRITICAL, HIGH, and MEDIUM events are always included.
+      - LOW events: first 10 shown if priority events exist, else first 20.
+      - Sorted by risk priority first (CRITICAL > HIGH > MEDIUM > LOW),
+        then by timestamp descending within each tier.
     """
     print("➡ /analyze API HIT")
 
@@ -297,20 +297,42 @@ def analyze():
     if not access_key or not secret_key:
         return jsonify({"error": "Missing AWS credentials"}), 400
 
+    # Noisy AWS-internal events to suppress from the dashboard
+    FILTER_EVENTS = {
+        "GenerateDataKey",
+        "GetBucketAcl",
+        "GetBucketPolicy",
+        "GetBucketWebsite",
+        "DescribeRegions",
+        "ListTrails",
+        "DescribeTrails",
+        "GetTrailStatus",
+        "DescribeConfigurationRecorders",
+        "DescribeConfigurationRecorderStatus",
+        "ListEventDataStores",
+        "ListIndexes",
+        "Search",
+        "ListApplications",
+        "ListNotificationHubs",
+        "ListAccessPoints",
+        "ListFileSystems",
+    }
+
+    # Priority order for sorting (lower number = higher priority)
+    RISK_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+
     try:
-        # ── 1. Build CloudTrail client ───────────────────────────────────────
+        # ── 1. Build CloudTrail client with dynamic region ───────────────────
         region = data.get("region", "ap-south-1")
 
         client = boto3.client(
-              "cloudtrail",
-             aws_access_key_id=access_key,
-             aws_secret_access_key=secret_key,
-             region_name=region
+            "cloudtrail",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
         )
 
         # ── 2. Paginate: 4 calls × 50 = up to 200 raw events ────────────────
-        # AWS hard-caps LookupEvents at 50 per call.
-        # 4 pages gives plenty of history without excessive latency.
         raw_events = []
         next_token = None
         MAX_PAGES = 4
@@ -325,23 +347,26 @@ def analyze():
             page_events = response.get("Events", [])
             raw_events.extend(page_events)
 
-            print(f"  Page {page_num + 1}: got {len(page_events)} events (total so far: {len(raw_events)})")
+            print(f"  Page {page_num + 1}: got {len(page_events)} events "
+                  f"(total so far: {len(raw_events)})")
 
             next_token = response.get("NextToken")
             if not next_token:
-                break  # fewer events exist than our page budget
+                break
 
         print(f"✅ Total raw events fetched: {len(raw_events)}")
 
-        # ── 3. Classify all events, dropping only true noise ─────────────────
-        priority_events = []   # CRITICAL / HIGH / MEDIUM
-        low_events = []        # LOW — kept as filler for a full dashboard
+        # ── 3. Classify events, filtering noise ──────────────────────────────
+        critical_events = []
+        high_events     = []
+        medium_events   = []
+        low_events      = []
 
         for event in raw_events:
             event_name = event.get("EventName", "Unknown")
 
-            # Drop only the tiny set of meaningless internal events
-            if event_name in IGNORED_EVENTS:
+            # Drop noisy AWS-internal events
+            if event_name in FILTER_EVENTS:
                 continue
 
             event_time = event.get("EventTime")
@@ -362,28 +387,42 @@ def analyze():
                 "reason":      reason,
             }
 
-            if risk == "LOW":
-                low_events.append(record)
+            if risk == "CRITICAL":
+                critical_events.append(record)
+            elif risk == "HIGH":
+                high_events.append(record)
+            elif risk == "MEDIUM":
+                medium_events.append(record)
             else:
-                priority_events.append(record)
+                low_events.append(record)
 
-        print(f"  Priority events (CRITICAL/HIGH/MEDIUM): {len(priority_events)}")
-        print(f"  LOW events available as filler:         {len(low_events)}")
+        print(f"  CRITICAL: {len(critical_events)} | HIGH: {len(high_events)} | "
+              f"MEDIUM: {len(medium_events)} | LOW: {len(low_events)}")
 
-        # ── 4. Build final result set ─────────────────────────────────────────
-        # Always include all priority events.
-        # Pad with LOW events so the dashboard reaches ~50 cards and looks full.
-        TARGET_TOTAL = 50
-        filler_needed = max(0, TARGET_TOTAL - len(priority_events))
-        results = priority_events + low_events[:filler_needed]
+        # ── 4. Apply result rules ─────────────────────────────────────────────
+        # Always show all CRITICAL, HIGH, MEDIUM events.
+        # LOW events: 10 if priority events exist, else 20.
+        priority_events = critical_events + high_events + medium_events
+        has_priority = len(priority_events) > 0
+        low_limit = 10 if has_priority else 20
+        results = priority_events + low_events[:low_limit]
 
-        # If we have nothing at all (brand-new / empty AWS account), return
-        # whatever raw LOW events exist rather than an empty list.
-        if not results:
-            results = low_events[:TARGET_TOTAL]
+        # ── 5. Sort: risk priority first, then timestamp descending ──────────
+        results.sort(key=lambda x: (
+            RISK_ORDER.get(x["risk"], 99),
+            # Negate timestamp string for descending order within same tier
+            # ISO-format strings sort lexicographically, so we reverse with a flag
+            x["time"] if x["time"] == "N/A" else "",
+        ))
 
-        # ── 5. Sort newest-first ──────────────────────────────────────────────
-        results.sort(key=lambda x: x["time"], reverse=True)
+        # Secondary sort by timestamp descending within each priority tier
+        results.sort(key=lambda x: (
+            RISK_ORDER.get(x["risk"], 99),
+            -(
+                int(datetime.strptime(x["time"], "%Y-%m-%d %H:%M:%S").timestamp())
+                if x["time"] != "N/A" else 0
+            ),
+        ))
 
         print(f"✅ Events returned to frontend: {len(results)}")
         return jsonify(results)
