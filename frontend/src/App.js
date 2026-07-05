@@ -3,22 +3,6 @@ import { useState, useEffect, useCallback } from "react";
 import { PieChart, Pie, Cell, Tooltip, Legend } from "recharts";
 import axios from "axios";
 
-// ================================================================
-// SINGLE SOURCE OF TRUTH FOR THE BACKEND URL
-// ================================================================
-// FIX: previously some calls pointed to the deployed Render backend
-// (signup, /users) while others pointed to http://127.0.0.1:5000
-// (login, analyze, iam-audit, download-report, scan-file). That meant
-// login and several dashboard features only worked if you happened to
-// have a Flask server running on your own machine at the same time —
-// they'd fail for every real visitor in production.
-//
-// Now every request goes through this one constant. Change it in one
-// place (or set REACT_APP_API_BASE_URL as an env var at build time) and
-// every request follows.
-const API_BASE_URL =
-  process.env.REACT_APP_API_BASE_URL || "https://cloud-ai-yipl.onrender.com";
-
 const STORAGE_KEY = "csa_user";
 
 function getUser() {
@@ -85,7 +69,7 @@ function LoginPage({ onLogin, onSwitch }) {
   setError("");
 
   try {
-    const res = await axios.post(`${API_BASE_URL}/login`, {
+    const res = await axios.post("http://127.0.0.1:5000/login", {
       username: form.username,
       password: form.password,
     });
@@ -164,7 +148,7 @@ function SignupPage({ onSwitch, onSignup }) {
     setError("");
 
     try {
-      const res = await axios.post(`${API_BASE_URL}/signup`, {
+      const res = await axios.post("https://cloud-ai-yipl.onrender.com/signup", {
         username: form.username,
         password: form.password,
       });
@@ -240,7 +224,7 @@ function Dashboard({ user, onLogout }) {
     }
     setLoading(true); setError(""); setResults([]); setAnalyzed(false);
     try {
-      const res = await axios.post(`${API_BASE_URL}/analyze`, {
+      const res = await axios.post("http://127.0.0.1:5000/analyze", {
         aws_access_key: awsKey,
         aws_secret_key: awsSecret,
       });
@@ -256,7 +240,7 @@ function Dashboard({ user, onLogout }) {
   const downloadCSV = async () => {
     try {
       const res = await axios.post(
-        `${API_BASE_URL}/download-report`,
+        "http://127.0.0.1:5000/download-report",
         { logs: results },
         { responseType: "blob" }
       );
@@ -283,7 +267,7 @@ function Dashboard({ user, onLogout }) {
   setAuditResults([]);
 
   try {
-    const res = await axios.post(`${API_BASE_URL}/iam-audit`, {
+    const res = await axios.post("http://127.0.0.1:5000/iam-audit", {
       aws_access_key: awsKey,
       aws_secret_key: awsSecret,
     });
@@ -550,7 +534,7 @@ function UsersPanel() {
 
   const fetchUsers = async () => {
     try {
-      const res = await axios.get(`${API_BASE_URL}/users`);
+      const res = await axios.get("https://cloud-ai-yipl.onrender.com/users");
       setUsers(res.data);
     } catch (err) {
       console.log("Error fetching users");
@@ -770,7 +754,7 @@ function FileScanner() {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await axios.post(`${API_BASE_URL}/scan-file`, formData);
+  const res = await axios.post("https://cloud-ai-yipl.onrender.com/scan-file", formData);
   setResult(res.data);
 };
 
