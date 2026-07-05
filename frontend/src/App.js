@@ -3,6 +3,22 @@ import { useState, useEffect, useCallback } from "react";
 import { PieChart, Pie, Cell, Tooltip, Legend } from "recharts";
 import axios from "axios";
 
+// ================================================================
+// SINGLE SOURCE OF TRUTH FOR THE BACKEND URL
+// ================================================================
+// FIX: previously some calls pointed to the deployed Render backend
+// (signup, /users) while others pointed to http://127.0.0.1:5000
+// (login, analyze, iam-audit, download-report, scan-file). That meant
+// login and several dashboard features only worked if you happened to
+// have a Flask server running on your own machine at the same time —
+// they'd fail for every real visitor in production.
+//
+// Now every request goes through this one constant. Change it in one
+// place (or set REACT_APP_API_BASE_URL as an env var at build time) and
+// every request follows.
+const API_BASE_URL =
+  process.env.REACT_APP_API_BASE_URL || "https://cloud-ai-yipl.onrender.com";
+
 const STORAGE_KEY = "csa_user";
 
 function getUser() {
@@ -69,7 +85,7 @@ function LoginPage({ onLogin, onSwitch }) {
   setError("");
 
   try {
-    const res = await axios.post("https://cloud-ai-yipl.onrender.com/login", {
+    const res = await axios.post(`${API_BASE_URL}/login`, {
       username: form.username,
       password: form.password,
     });
@@ -85,9 +101,15 @@ else if (res.data.message === "Login successful") {
 else {
   setError(res.data.error);
 }
-  } catch (err) {
+ } catch (err) {
+  console.log(err.response?.data);
+
+  if (err.response?.data?.error) {
+    setError(err.response.data.error);
+  } else {
     setError("Server error");
   }
+}
 
   setLoading(false);   // ✅ IMPORTANT
 };
@@ -142,7 +164,7 @@ function SignupPage({ onSwitch, onSignup }) {
     setError("");
 
     try {
-      const res = await axios.post("https://cloud-ai-yipl.onrender.com/signup", {
+      const res = await axios.post(`${API_BASE_URL}/signup`, {
         username: form.username,
         password: form.password,
       });
@@ -208,6 +230,8 @@ function Dashboard({ user, onLogout }) {
   const [analyzed, setAnalyzed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [activeNav, setActiveNav] = useState("Analyzer");
+  const [auditResults, setAuditResults] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
 
   const analyze = useCallback(async () => {
     if (!awsKey.trim() || !awsSecret.trim()) {
@@ -216,7 +240,7 @@ function Dashboard({ user, onLogout }) {
     }
     setLoading(true); setError(""); setResults([]); setAnalyzed(false);
     try {
-      const res = await axios.post("https://cloud-ai-yipl.onrender.com/analyze", {
+      const res = await axios.post(`${API_BASE_URL}/analyze`, {
         aws_access_key: awsKey,
         aws_secret_key: awsSecret,
       });
@@ -229,12 +253,64 @@ function Dashboard({ user, onLogout }) {
     }
   }, [awsKey, awsSecret]);
 
-  const stats = {
-    total: results.length,
-    critical: results.filter(r => (r.risk || r.riskLevel || "").toUpperCase() === "CRITICAL").length,
-    high: results.filter(r => (r.risk || r.riskLevel || "").toUpperCase() === "HIGH").length,
-    low: results.filter(r => ["LOW","INFO"].includes((r.risk || r.riskLevel || "").toUpperCase())).length,
+  const downloadCSV = async () => {
+    try {
+      const res = await axios.post(
+        `${API_BASE_URL}/download-report`,
+        { logs: results },
+        { responseType: "blob" }
+      );
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", "security_report.csv");
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      alert("Failed to download report. Please run an analysis first.");
+    }
   };
+
+  const runIAMAudit = async () => {
+  if (!awsKey.trim() || !awsSecret.trim()) {
+    alert("Please enter AWS credentials in the Analyzer tab first.");
+    return;
+  }
+
+  setAuditLoading(true);
+  setAuditResults([]);
+
+  try {
+    const res = await axios.post(`${API_BASE_URL}/iam-audit`, {
+      aws_access_key: awsKey,
+      aws_secret_key: awsSecret,
+    });
+
+    console.log("IAM RESPONSE:", res.data);   // 🔥 ADD THIS
+
+    const data = res.data?.results || res.data || [];
+
+    setAuditResults(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.log("IAM ERROR:", err.response?.data || err.message); // 🔥 ADD THIS
+    alert("IAM Audit failed. Check console.");
+  } finally {
+    setAuditLoading(false);
+  }
+};
+
+ const getRisk = (r) => (r?.risk || "").toUpperCase();
+
+const stats = {
+  total: results.length,
+  critical: results.filter(r => getRisk(r) === "CRITICAL").length,
+  high: results.filter(r => getRisk(r) === "HIGH").length,
+  medium: results.filter(r => getRisk(r) === "MEDIUM").length,
+  low: results.filter(r => getRisk(r) === "LOW").length,
+  info: results.filter(r => getRisk(r) === "INFO").length,
+};
 
   const navItems = ["Analyzer", "Reports", "IAM Audit", "Settings"];
 
@@ -250,7 +326,7 @@ function Dashboard({ user, onLogout }) {
         <nav style={styles.desktopNav}>
           {navItems.map(item => (
             <span key={item} style={activeNav === item ? styles.navItemActive : styles.navItem}
-              onClick={() => setActiveNav(item)}>{item}</span>
+              onClick={() => { setActiveNav(item); if (item === "IAM Audit") runIAMAudit(); }}>{item}</span>
           ))}
         </nav>
         <div style={styles.headerRight}>
@@ -271,7 +347,7 @@ function Dashboard({ user, onLogout }) {
         <div style={styles.mobileMenu}>
           {navItems.map(item => (
             <span key={item} style={styles.mobileNavItem}
-              onClick={() => { setActiveNav(item); setMobileMenuOpen(false); }}>{item}</span>
+              onClick={() => { setActiveNav(item); setMobileMenuOpen(false); if (item === "IAM Audit") runIAMAudit(); }}>{item}</span>
           ))}
         </div>
       )}
@@ -304,10 +380,12 @@ function Dashboard({ user, onLogout }) {
             <StatCard icon={<TotalIcon />} label="Total Events" value={stats.total} color="#38bdf8" />
             <StatCard icon={<CriticalIcon />} label="Critical Alerts" value={stats.critical} color="#ef4444" />
             <StatCard icon={<HighIcon />} label="High Severity" value={stats.high} color="#f97316" />
+            <StatCard icon={"🔵"} label="Medium Severity" value={stats.medium} color="#3b82f6" />
             <StatCard icon={<LowIcon />} label="Low / Info" value={stats.low} color="#22c55e" />
           </div>
         )}
 
+        {activeNav === "Analyzer" && (<>
         <div style={styles.card}>
           <div style={styles.cardHeader}>
             <div style={styles.cardTitleRow}>
@@ -374,6 +452,76 @@ function Dashboard({ user, onLogout }) {
             <p style={styles.emptySubText}>Your AWS environment looks clean.</p>
           </div>
         )}
+        </>)}
+
+        {/* ── REPORTS TAB ── */}
+        {activeNav === "Reports" && (
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <div style={styles.cardTitleRow}>
+                <h3 style={styles.cardTitle}>📄 Reports</h3>
+              </div>
+              <span style={styles.cardBadge}>CSV Export</span>
+            </div>
+            <p style={{ color: "#94a3b8", fontSize: 14, marginBottom: 16 }}>
+              Download the current analysis results as a CSV file.
+              {results.length === 0 && " Run a Security Scan first to populate data."}
+            </p>
+            <button
+              style={{ ...styles.btnPrimary, minWidth: 180 }}
+              onClick={downloadCSV}
+              disabled={results.length === 0}
+            >
+              ⬇ Download CSV
+            </button>
+          </div>
+        )}
+
+        {/* ── IAM AUDIT TAB ── */}
+        {activeNav === "IAM Audit" && (
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <div style={styles.cardTitleRow}>
+                <h3 style={styles.cardTitle}>🔐 IAM Audit</h3>
+              </div>
+              <span style={styles.cardBadge}>Identity & Access</span>
+            </div>
+            {auditLoading && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#94a3b8", fontSize: 14 }}>
+                <Spinner /> Running IAM audit...
+              </div>
+            )}
+            {!auditLoading && auditResults.length === 0 && (
+              <p style={{ color: "#64748b", fontSize: 14 }}>
+                No audit results yet. Enter AWS credentials and click IAM Audit in the nav.
+              </p>
+            )}
+            {!auditLoading && auditResults.length > 0 && (
+              <div style={styles.resultsList}>
+                {auditResults.map((item, i) => {
+                  const riskUpper = (item.risk || "").toUpperCase();
+                  const riskColor = riskUpper === "HIGH" ? "#ef4444" : riskUpper === "LOW" ? "#22c55e" : "#94a3b8";
+                  return (
+                    <div key={i} style={{
+                      ...styles.logCard,
+                      border: `1px solid ${riskColor}44`,
+                      background: "rgba(15,23,42,0.6)",
+                    }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                        <span style={{ fontWeight: 600, color: "#f1f5f9", fontSize: 14 }}>{item.user || item.username || "Unknown User"}</span>
+                        <span style={{ fontWeight: 700, fontSize: 13, color: riskColor }}>{riskUpper}</span>
+                      </div>
+                      <div style={{ marginTop: 8, fontSize: 13, color: "#94a3b8" }}>
+                        <span>🔑 Keys: {item.keys??item.num_keys ?? item.number_of_keys ?? "—"}</span>
+                        {item.reason && <span style={{ marginLeft: 16 }}>⚠ {item.reason}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </main>
     </div>
   );
@@ -402,7 +550,7 @@ function UsersPanel() {
 
   const fetchUsers = async () => {
     try {
-      const res = await axios.get("https://cloud-ai-yipl.onrender.com/users");
+      const res = await axios.get(`${API_BASE_URL}/users`);
       setUsers(res.data);
     } catch (err) {
       console.log("Error fetching users");
@@ -478,7 +626,13 @@ function LogCard({ log, index }) {
         <div style={styles.logLeft}>
           <span style={styles.logEvent}>{eventName}</span>
           {detail && <span style={styles.logDetail}>{detail}</span>}
+          {log.reason && (
+  <p style={{ color: "#ff6b6b", fontSize: "12px", marginTop: "4px" }}>
+    ⚠ {log.reason}
+  </p>
+)}
         </div>
+        
         <span style={{
           ...styles.riskBadge,
           background: rc.bg,
@@ -565,13 +719,17 @@ function Spinner() {
 
 
 function RiskChart({ logs }) {
-  const data = [
-    { name: "LOW", value: logs.filter(l => l.risk === "LOW").length },
-    { name: "HIGH", value: logs.filter(l => l.risk === "HIGH").length },
-    { name: "CRITICAL", value: logs.filter(l => l.risk === "CRITICAL").length },
-  ];
+  if (!logs || logs.length === 0) return null;
+const getRisk = (r) => (r?.risk || "").toUpperCase();
 
-  const COLORS = ["green", "orange", "red"];
+const data = [
+  { name: "LOW", value: logs.filter(l => getRisk(l) === "LOW").length },
+  { name: "HIGH", value: logs.filter(l => getRisk(l) === "HIGH").length },
+  { name: "CRITICAL", value: logs.filter(l => getRisk(l) === "CRITICAL").length },
+  { name: "MEDIUM", value: logs.filter(l => getRisk(l) === "MEDIUM").length },
+  { name: "INFO", value: logs.filter(l => getRisk(l) === "INFO").length },
+];
+ const COLORS = ["green", "orange", "red", "blue", "gray"];
 
   return (
     <div style={{ marginTop: 40 }}>
@@ -612,7 +770,7 @@ function FileScanner() {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await axios.post("https://cloud-ai-yipl.onrender.com/scan-file", formData);
+  const res = await axios.post(`${API_BASE_URL}/scan-file`, formData);
   setResult(res.data);
 };
 
@@ -1135,16 +1293,20 @@ const styles = {
     flex: 1,
   },
   logEvent: {
-    fontSize: 14,
-    fontWeight: 600,
-    color: "#f1f5f9",
-    fontFamily: "'DM Mono', 'IBM Plex Mono', monospace",
-  },
-  logDetail: {
-    fontSize: 12,
-    color: "#64748b",
-    lineHeight: 1.5,
-  },
+  color: "#111",   // 🔥 DARK TEXT (MAIN FIX)
+  fontWeight: "bold",
+  fontSize: "16px"
+},
+
+logDetail: {
+  color: "#333",   // 🔥 visible
+  fontSize: "13px"
+},
+
+// logMetaItem: {
+//   color: "#555",   // 🔥 visible
+//   fontSize: "12px"
+// },
   riskBadge: {
     display: "inline-flex",
     alignItems: "center",
